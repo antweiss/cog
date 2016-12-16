@@ -12,7 +12,8 @@ defmodule Cog.Command.Pipeline.Initializer do
 
   alias Carrier.Messaging.Connection
   alias Cog.Command.ReplyHelper
-  alias Cog.Command.Pipeline.ExecutorSup
+  alias Cog.Command.Pipeline2.ExecutorSup
+  alias Cog.Command.Pipeline2.Executor
   alias Cog.Repository.Users
   alias Cog.Repository.ChatHandles
   alias Cog.Passwords
@@ -45,7 +46,8 @@ defmodule Cog.Command.Pipeline.Initializer do
         # adapter, too
         case check_history(payload, state) do
           {true, payload, state} ->
-            {:ok, _} = ExecutorSup.run(payload)
+            {:ok, executor} = ExecutorSup.create(payload)
+            Process.spawn(fn() -> Executor.run(executor) end, [])
             {:noreply, state}
           {false, state} ->
             {:noreply, state}

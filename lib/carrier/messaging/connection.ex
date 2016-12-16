@@ -47,7 +47,7 @@ defmodule Carrier.Messaging.Connection do
 
   """
   # Again, this spec is what comes from emqttc
-  @spec connect(Keyword.t()) :: {:ok, connection()} | :ignore | {:error, term()}
+  @spec connect(Keyword.t()) :: {:ok, connection()} | {:error, term()}
   def connect(opts) do
     connect_timeout = Keyword.get(opts, :connect_timeout, @default_connect_timeout)
 

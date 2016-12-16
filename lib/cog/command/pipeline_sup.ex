@@ -9,6 +9,7 @@ defmodule Cog.Command.PipelineSup do
 
   def init(_) do
     children = [worker(Command.PermissionsCache, []),
+                supervisor(Command.Pipeline2.PipelineSup, []),
                 supervisor(Command.Pipeline.ExecutorSup, []),
                 worker(Command.Pipeline.Initializer, [])]
     supervise(children, strategy: :one_for_one)

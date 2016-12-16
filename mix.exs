@@ -66,6 +66,8 @@ defmodule Cog.Mixfile do
       {:spanner, github: "operable/spanner"},
       {:greenbar, github: "operable/greenbar"},
 
+      {:gen_stage, "~> 0.10.0"},
+
       # MQTT-related
       ########################################################################
       {:emqttc, github: "emqtt/emqttc", branch: "master"},

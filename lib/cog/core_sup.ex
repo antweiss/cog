@@ -11,6 +11,7 @@ defmodule Cog.CoreSup do
                 supervisor(Cog.Util.CacheSup, []),
                 supervisor(Cog.Relay.RelaySup, []),
                 supervisor(Cog.Command.CommandSup, []),
+                supervisor(Carrier.Messaging.MultiplexerSup, []),
                 supervisor(Cog.Endpoint, []),
                 supervisor(Cog.TriggerEndpoint, []),
                 supervisor(Cog.ServiceEndpoint, []),
