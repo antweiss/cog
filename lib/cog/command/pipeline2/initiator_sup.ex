@@ -11,6 +11,6 @@ defmodule Cog.Command.Pipeline2.InitiatorSup do
     supervise(children, strategy: :simple_one_for_one, max_restarts: 0, max_seconds: 1)
   end
 
-  def create(opts), do: Supervisor.start_child(__MODULE__, opts)
+  def create(opts), do: Supervisor.start_child(__MODULE__, [opts])
 
 end

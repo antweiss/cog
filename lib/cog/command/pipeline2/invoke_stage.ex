@@ -48,10 +48,10 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   * `:service_token` - Token used to access Cog services. Optional.
   """
   def start_link(opts) do
-    GenStage.start_link(__MODULE__, [opts])
+    GenStage.start_link(__MODULE__, opts)
   end
 
-  def init([opts]) do
+  def init(opts) do
     upstream = Keyword.fetch!(opts, :upstream)
     pipeline_id = Keyword.fetch!(opts, :pipeline_id)
     seq_id = Keyword.fetch!(opts, :sequence_id)
@@ -82,6 +82,10 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   def handle_events(events, _from, state) do
     {outputs, state} = Enum.reduce_while(events, {[], state}, &process_signal/2)
     {:noreply, Enum.reverse(outputs), state}
+  end
+
+  def terminate(reason, state) do
+    Logger.debug("Invoke stage #{state.seq_id} for pipeline #{state.pipeline_id} stopped: #{inspect reason}")
   end
 
   defp process_signal(%Signal{}=signal, {accum, state}) do

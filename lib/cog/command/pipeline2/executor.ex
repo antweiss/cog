@@ -2,11 +2,12 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   use GenServer
 
+  alias Experimental.GenStage
   alias Carrier.Messaging.MultiplexerSup
   alias Cog.Chat.Adapter, as: ChatAdapter
   alias Cog.Command.{CommandResolver, PermissionsCache, ReplyHelper}
   alias Cog.Command.Pipeline.Destination
-  alias Cog.Command.Pipeline2.{InitiatorSup, InvokeSup, TerminatorSup}
+  alias Cog.Command.Pipeline2.{InitiatorSup, InvokeSup, Signal, TerminatorSup}
   alias Cog.Messages.AdapterRequest
   alias Cog.Queries
   alias Cog.Repo
@@ -16,27 +17,26 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   require Logger
 
-  defstruct [
-    mux: nil,
-    request: nil,
-    stages: [],
-    terminator: nil,
-    user: nil,
-    permissions: nil,
-    service_token: nil,
-    command_timeout: nil
-  ]
+  defstruct [started: nil,
+             mux: nil,
+             request: nil,
+             stages: [],
+             terminator: nil,
+             user: nil,
+             permissions: nil,
+             service_token: nil,
+             command_timeout: nil]
 
   def start_link(%AdapterRequest{}=request) do
     GenServer.start_link(__MODULE__, [request])
   end
 
-  def run(executor) do
-    GenServer.call(executor, :run, :infinity)
-  end
+  def get_request(executor), do: GenServer.call(executor, :get_request, :infinity)
 
-  def deliver_results(executor, results) do
-    GenServer.cast(executor, {:deliver_results, results})
+  def run(executor), do: GenServer.cast(executor, :run)
+
+  def notify(executor) do
+    GenServer.cast(executor, :teardown)
   end
 
   def init([request]) do
@@ -48,7 +48,8 @@ defmodule Cog.Command.Pipeline2.Executor do
       {:ok, user} ->
         {:ok, perms} = PermissionsCache.fetch(user)
         command_timeout = get_command_timeout(request.adapter, config)
-        state = %__MODULE__{request: request,
+        state = %__MODULE__{started: System.os_time(:milliseconds),
+                            request: request,
                             mux: mux,
                             user: user,
                             service_token: service_token,
@@ -65,27 +66,41 @@ defmodule Cog.Command.Pipeline2.Executor do
     end
   end
 
-  def handle_call(:run, _from, state) do
+  def handle_call(:get_request, _from, state) do
+    {:reply, state.request, state}
+  end
+
+  def handle_cast(:teardown, state) do
+    # Shutdown gracefully
+    {:stop, :shutdown, state}
+  end
+
+  def handle_cast(:run, state) do
+    pipeline_id = state.request.id
     case parse(state) do
       {:ok, pipeline, destinations, state} ->
         {:ok, initial_context} = create_initial_context(state.request)
-        {:ok, initiator} = InitiatorSup.create(inputs: initial_context)
+        {:ok, initiator} = InitiatorSup.create(inputs: initial_context, pipeline_id: pipeline_id)
         stages = pipeline
                  |> Enum.with_index
                  |> Enum.reduce([initiator], &(create_invoke_stage(&1, &2, state)))
-        {:reply, :ok, %{state | stages: terminate_pipeline(stages, destinations)}}
-      error ->
-        {:reply, error, state}
+        {:noreply, %{state | stages: add_terminator(pipeline_id, stages, destinations)}}
+      {:error, error, state}->
+        {:ok, initiator} = InitiatorSup.create(inputs: [Signal.error(error)], pipeline_id: pipeline_id)
+        {:noreply, %{state | stages: add_terminator(pipeline_id, [initiator], [])}}
     end
   end
 
-  def handle_cast({:deliver_results, results}, state) do
-    IO.puts "Results: #{inspect results, pretty: true}"
-    {:noreply, state}
+  def terminate(_reason, state) do
+    # Stop all stages
+    Enum.each(state.stages, &GenStage.stop/1)
+    elapsed = System.os_time(:milliseconds) - state.started
+    Logger.debug("Pipeline #{state.request.id} executed for #{elapsed} ms")
   end
 
-  defp terminate_pipeline([upstream|_]=stages, destinations) do
-    opts = [upstream: upstream,
+  defp add_terminator(pipeline_id, [upstream|_]=stages, destinations) do
+    opts = [pipeline_id: pipeline_id,
+            upstream: upstream,
             destinations: destinations,
             executor: self()]
     {:ok, terminator} = TerminatorSup.create(opts)
@@ -94,7 +109,7 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   defp create_invoke_stage({invocation, index}, [upstream|_]=accum, state) do
     opts = [upstream: upstream, pipeline_id: state.request.id,
-            sequence_id: index, multiplexer: state.mux,
+            sequence_id: index + 1, multiplexer: state.mux,
             request: state.request, invocation: invocation,
             user: state.user, permissions: state.permissions,
             service_token: state.service_token]
@@ -214,12 +229,18 @@ defmodule Cog.Command.Pipeline2.Executor do
   # In general, chat-adapter initiated pipelines will not be supplied
   # with an initial context.
   defp create_initial_context(%Cog.Messages.AdapterRequest{}=request) do
-    context = List.wrap(request.initial_context)
-
-    if Enum.all?(context, &is_map/1) do
-      {:ok, context}
+    if is_list(request.initial_context) do
+      if Enum.all?(request.initial_context, &is_map/1) do
+        {:ok, Enum.map(request.initial_context, &(Signal.wrap(&1)))}
+      else
+        :error
+      end
     else
-      :error
+      if is_map(request.initial_context) do
+        {:ok, [Signal.wrap(request.initial_context)]}
+      else
+        :error
+      end
     end
   end
 

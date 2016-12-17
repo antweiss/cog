@@ -6,12 +6,11 @@ defmodule Cog.Command.Pipeline2.Signal do
     template: nil,
     done: false,
     failed: false,
-    error: nil
   ]
 
   def done, do: %__MODULE__{done: true}
 
-  def error(error), do: %__MODULE__{error: error, failed: true}
+  def error(error), do: %__MODULE__{data: error, failed: true}
 
   def wrap(data), do: %__MODULE__{data: data}
 
