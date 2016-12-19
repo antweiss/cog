@@ -11,7 +11,7 @@ defmodule Cog.Command.Pipeline2.ExecutorSup do
     supervise(children, strategy: :simple_one_for_one, max_restarts: 0, max_seconds: 1)
   end
 
-  def create(opts) do
+  def run(opts) do
     case Supervisor.start_child(__MODULE__, [opts]) do
       {:ok, pid} ->
         Executor.run(pid)
