@@ -33,6 +33,8 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   def get_request(executor), do: GenServer.call(executor, :get_request, :infinity)
 
+  def get_started(executor), do: GenServer.call(executor, :get_started, :infinity)
+
   def run(executor), do: GenServer.cast(executor, :run)
 
   def notify(executor) do
@@ -48,7 +50,7 @@ defmodule Cog.Command.Pipeline2.Executor do
       {:ok, user} ->
         {:ok, perms} = PermissionsCache.fetch(user)
         command_timeout = get_command_timeout(request.adapter, config)
-        state = %__MODULE__{started: System.os_time(:milliseconds),
+        state = %__MODULE__{started: :os.timestamp(),
                             request: request,
                             mux: mux,
                             user: user,
@@ -68,6 +70,9 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   def handle_call(:get_request, _from, state) do
     {:reply, state.request, state}
+  end
+  def handle_call(:get_started, _from, state) do
+    {:reply, state.started, state}
   end
 
   def handle_cast(:teardown, state) do
@@ -94,7 +99,7 @@ defmodule Cog.Command.Pipeline2.Executor do
   def terminate(_reason, state) do
     # Stop all stages
     Enum.each(state.stages, &GenStage.stop/1)
-    elapsed = System.os_time(:milliseconds) - state.started
+    elapsed = :erlang.round(:timer.now_diff(:os.timestamp(), state.started) / 1000)
     Logger.debug("Pipeline #{state.request.id} executed for #{elapsed} ms")
   end
 

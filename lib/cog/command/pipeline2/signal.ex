@@ -4,6 +4,7 @@ defmodule Cog.Command.Pipeline2.Signal do
     data: nil,
     bundle_version_id: nil,
     template: nil,
+    position: nil,
     done: false,
     failed: false,
   ]

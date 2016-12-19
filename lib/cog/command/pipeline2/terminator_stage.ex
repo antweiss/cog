@@ -89,10 +89,12 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
 
   defp error_response(signal, state) do
     request = Executor.get_request(state.executor)
+    started = Cog.Events.Util.ts_iso8601_utc(Executor.get_started(state.executor))
     error_context = %{"id" => state.pipeline_id,
+                      "started" => started,
                       "initiator" => sender_name(request),
                       "pipeline_text" => request.text,
-                      "error_message" => ErrorResponse.render(signal.data),
+                      "error_message" => ErrorResponse.render(unwrap_error(signal.data)),
                       "planning_failure" => "",
                       "execution_failure" => ""}
     payload = if ChatAdapter.is_chat_provider?(request.adapter) do
@@ -110,5 +112,8 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
       request.sender.id
     end
   end
+
+  defp unwrap_error({:error, reason}), do: reason
+  defp unwrap_error(error), do: error
 
 end
