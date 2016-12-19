@@ -28,6 +28,7 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
     upstream = Keyword.fetch!(opts, :upstream)
     executor = Keyword.fetch!(opts, :executor)
     destinations = Keyword.fetch!(opts, :destinations)
+    :erlang.monitor(:process, executor)
     {:consumer, %__MODULE__{pipeline_id: pipeline_id,
                             executor: executor, destinations: destinations}, subscribe_to: [upstream]}
   end
@@ -41,6 +42,10 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
       Executor.notify(state.executor)
     end
     {:noreply, [], state}
+  end
+
+  def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{executor: executor}=state) when pid == executor do
+    {:stop, :shutdown, state}
   end
 
   def terminate(reason, state) do

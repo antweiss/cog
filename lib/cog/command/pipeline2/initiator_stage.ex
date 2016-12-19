@@ -6,7 +6,8 @@ defmodule Cog.Command.Pipeline2.InitiatorStage do
   use GenStage
   require Logger
 
-  defstruct [pipeline_id: nil,
+  defstruct [executor: nil,
+             pipeline_id: nil,
              inputs: []]
 
   def start_link(opts) do
@@ -14,9 +15,13 @@ defmodule Cog.Command.Pipeline2.InitiatorStage do
   end
 
   def init(opts) do
+    executor = Keyword.fetch!(opts, :executor)
+    :erlang.monitor(:process, executor)
     inputs = Keyword.fetch!(opts, :inputs)
     pipeline_id = Keyword.fetch!(opts, :pipeline_id)
-    {:producer, %__MODULE__{inputs: List.wrap(inputs), pipeline_id: pipeline_id}}
+    {:producer, %__MODULE__{executor: executor,
+                            inputs: List.wrap(inputs),
+                            pipeline_id: pipeline_id}}
   end
 
   def handle_demand(_count, %__MODULE__{inputs: []}=state) do
@@ -32,6 +37,10 @@ defmodule Cog.Command.Pipeline2.InitiatorStage do
                   outputs
               end
     {:noreply, outputs, %{state | inputs: remaining}}
+  end
+
+  def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{executor: executor}=state) when pid == executor do
+    {:stop, :shutdown, state}
   end
 
   def terminate(reason, state) do

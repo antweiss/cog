@@ -16,7 +16,8 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
 
   require Logger
 
-  defstruct [upstream: nil,
+  defstruct [executor: nil,
+             upstream: nil,
              first: true,
              done: false,
              error: nil,
@@ -38,6 +39,7 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   Starts a stage to invoke a command
 
   ## Options
+  * `:executor` - Pid of the executor responsible for the entire pipeline. Required.
   * `:upstream` - Pid of the preceding pipeline stage. Required.
   * `:pipeline_id` - Id of parent command pipeline. Required.
   * `:sequence_id` - Stage sequence id. Required.
@@ -53,6 +55,8 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   end
 
   def init(opts) do
+    executor = Keyword.fetch!(opts, :executor)
+    :erlang.monitor(:process, executor)
     upstream = Keyword.fetch!(opts, :upstream)
     pipeline_id = Keyword.fetch!(opts, :pipeline_id)
     seq_id = Keyword.fetch!(opts, :sequence_id)
@@ -63,7 +67,8 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
     user = Keyword.fetch!(opts, :user)
     perms = Keyword.fetch!(opts, :permissions)
     service_token = Keyword.get(opts, :service_token)
-    state = %__MODULE__{upstream: upstream,
+    state = %__MODULE__{executor: executor,
+                        upstream: upstream,
                         pipeline_id: pipeline_id,
                         seq_id: seq_id,
                         mux: mux,
@@ -96,6 +101,10 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
     {outputs, state} = Enum.reduce_while(events, {[], state}, &process_signal/2)
     outputs = Enum.reverse(outputs)
     {:noreply, outputs, state}
+  end
+
+  def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{executor: executor}=state) when pid == executor do
+    {:stop, :shutdown, state}
   end
 
   def terminate(reason, state) do

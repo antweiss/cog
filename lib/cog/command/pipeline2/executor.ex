@@ -2,7 +2,6 @@ defmodule Cog.Command.Pipeline2.Executor do
 
   use GenServer
 
-  alias Experimental.GenStage
   alias Carrier.Messaging.MultiplexerSup
   alias Cog.Chat.Adapter, as: ChatAdapter
   alias Cog.Command.{CommandResolver, PermissionsCache, ReplyHelper}
@@ -85,7 +84,8 @@ defmodule Cog.Command.Pipeline2.Executor do
     case parse(state) do
       {:ok, pipeline, destinations, state} ->
         {:ok, initial_context} = create_initial_context(state.request)
-        {:ok, initiator} = InitiatorSup.create(inputs: initial_context, pipeline_id: pipeline_id)
+        {:ok, initiator} = InitiatorSup.create(executor: self(),
+          inputs: initial_context, pipeline_id: pipeline_id)
         stages = pipeline
                  |> Enum.with_index
                  |> Enum.reduce([initiator], &(create_invoke_stage(&1, &2, state)))
@@ -97,8 +97,6 @@ defmodule Cog.Command.Pipeline2.Executor do
   end
 
   def terminate(_reason, state) do
-    # Stop all stages
-    Enum.each(state.stages, &GenStage.stop/1)
     elapsed = :erlang.round(:timer.now_diff(:os.timestamp(), state.started) / 1000)
     Logger.debug("Pipeline #{state.request.id} executed for #{elapsed} ms")
   end
@@ -113,7 +111,8 @@ defmodule Cog.Command.Pipeline2.Executor do
   end
 
   defp create_invoke_stage({invocation, index}, [upstream|_]=accum, state) do
-    opts = [upstream: upstream, pipeline_id: state.request.id,
+    opts = [executor: self(),
+            upstream: upstream, pipeline_id: state.request.id,
             sequence_id: index + 1, multiplexer: state.mux,
             request: state.request, invocation: invocation,
             user: state.user, permissions: state.permissions,
