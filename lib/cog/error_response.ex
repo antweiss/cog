@@ -6,8 +6,9 @@ defmodule Cog.ErrorResponse do
     do: msg
   def render({:redirect_error, invalid}),
     do: redirection_error_message(invalid)
-  def render({:binding_error, {:missing_key, var}}),
-    do: "I can't find the variable '$#{var}'."
+  def render({error_type, {:missing_key, var}}) when error_type in [:binding_error, :error] do
+    "I can't find the variable '$#{var}'."
+  end
   def render({:binding_error, msg}) when is_binary(msg),
     do: msg
   def render({:no_rule, current_invocation}),
