@@ -49,7 +49,7 @@ defmodule Cog.Command.Pipeline2.Executor do
       {:ok, user} ->
         {:ok, perms} = PermissionsCache.fetch(user)
         command_timeout = get_command_timeout(request.adapter, config)
-        state = %__MODULE__{started: :os.timestamp(),
+        state = %__MODULE__{started: DateTime.utc_now(),
                             request: request,
                             mux: mux,
                             user: user,
@@ -97,7 +97,8 @@ defmodule Cog.Command.Pipeline2.Executor do
   end
 
   def terminate(_reason, state) do
-    elapsed = :erlang.round(:timer.now_diff(:os.timestamp(), state.started) / 1000)
+    elapsed = DateTime.to_unix(DateTime.utc_now(), :milliseconds) -
+              DateTime.to_unix(state.started, :milliseconds)
     Logger.debug("Pipeline #{state.request.id} executed for #{elapsed} ms")
   end
 
