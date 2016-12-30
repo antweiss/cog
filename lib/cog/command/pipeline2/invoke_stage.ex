@@ -17,13 +17,13 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   require Logger
 
   defstruct [executor: nil,
+             timeout: nil,
              upstream: nil,
              first: true,
              done: false,
              error: nil,
              pipeline_id: nil,
              seq_id: nil,
-             started: :os.timestamp(),
              mux: nil,
              topic: nil,
              relay: nil,
@@ -41,6 +41,7 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   ## Options
   * `:executor` - Pid of the executor responsible for the entire pipeline. Required.
   * `:upstream` - Pid of the preceding pipeline stage. Required.
+  * `:timeout` - Pipeline timeout in milliseconds. Required.
   * `:pipeline_id` - Id of parent command pipeline. Required.
   * `:sequence_id` - Stage sequence id. Required.
   * `:multiplexer` - Pid of MQTT multiplexer assigned to the parent pipeline. Required.
@@ -58,6 +59,7 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
     executor = Keyword.fetch!(opts, :executor)
     :erlang.monitor(:process, executor)
     upstream = Keyword.fetch!(opts, :upstream)
+    timeout = Keyword.fetch!(opts, :timeout)
     pipeline_id = Keyword.fetch!(opts, :pipeline_id)
     seq_id = Keyword.fetch!(opts, :sequence_id)
     mux = Keyword.fetch!(opts, :multiplexer)
@@ -71,6 +73,7 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
                         upstream: upstream,
                         pipeline_id: pipeline_id,
                         seq_id: seq_id,
+                        timeout: timeout,
                         mux: mux,
                         topic: topic,
                         request: request,
@@ -94,17 +97,19 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   end
   # Send error and then stop processing
   def handle_events(_events, _from, %__MODULE__{error: error}=state) when error != nil do
-    {:noreply, [error, Signal.done()], %{state | done: true, error: nil}}
+    {:noreply, [Signal.error(state.error, "#{state.invocation}"), Signal.done()], %{state | done: true, error: nil}}
   end
   def handle_events(events, _from, state) do
     {events, state} = set_stream_positions(events, state)
     {outputs, state} = Enum.reduce_while(events, {[], state}, &process_signal/2)
-    outputs = Enum.reverse(outputs)
     {:noreply, outputs, state}
   end
 
   def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{executor: executor}=state) when pid == executor do
     {:stop, :shutdown, state}
+  end
+  def handle_info(_, state) do
+    {:noreply, [], state}
   end
 
   def terminate(reason, state) do
@@ -141,35 +146,44 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   defp process_signal(%Signal{}=signal, {accum, state}) do
     cond do
       Signal.done?(signal) ->
-        {:halt, {[signal|accum], %{state | done: true}}}
+        {:halt, {accum ++ [signal], %{state | done: true}}}
       Signal.failed?(signal) ->
-        {:halt, {[Signal.done(), signal], %{state | done: true}}}
+        {:halt, {[signal, Signal.done()], %{state | done: true}}}
       true ->
         case execute_signal(signal, state) do
           {:ok, nil, state} ->
             {:cont, {accum, state}}
           {:ok, signals, state} ->
             {:cont, {accum ++ signals, state}}
+          {:error, :denied, rule, text, state} ->
+            {:halt, {[Signal.error(:denied, %{text: text, rule: rule}), Signal.done()], state}}
+          {:error, :timeout, text, state} ->
+            {:halt, {[Signal.error(:timeout, text), Signal.done()], state}}
           {:error, reason, state} ->
-            {:halt, {[Signal.done(), Signal.error(reason)], state}}
+            {:halt, {[Signal.error(reason), Signal.done()], state}}
         end
     end
   end
 
   defp execute_signal(signal, state) do
+    started = DateTime.utc_now()
     case verify_relay(state) do
       {:ok, state} ->
         case signal_to_request(signal, state) do
           {:ok, text, request} ->
-            dispatch_event(text, request.cog_env, state.relay, state)
+            dispatch_event(text, request.cog_env, state.relay, started, state)
             Multiplexer.publish(state.mux, request, routed_by: state.relay_topic)
             topic = state.topic
             receive do
               {:publish, ^topic, message} ->
                 process_response(CommandResponse.decode!(message), state)
-            after 60000 ->
-                {:error, {:error, :timeout}, state}
+            after state.timeout ->
+                {:error, :timeout, text, state}
             end
+          {:error, :denied, rule, text} ->
+            {:error, :denied, rule, text, state}
+          error ->
+            {:error, error, state}
         end
       error ->
         {:error, error, state}
@@ -206,31 +220,41 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
   end
 
   defp signal_to_request(signal, state) do
+    case check_permissions(signal, state) do
+      {:allowed, invocation, options, args} ->
+        {:ok, "#{invocation}", %Cog.Messages.Command{command: state.invocation.meta.full_command_name,
+                                                     options: options,
+                                                     args: args,
+                                                     invocation_id: state.invocation.id,
+                                                     invocation_step: signal.position,
+                                                     # TODO: stuffing the provider into requestor here is a bit
+                                                     # code-smelly; investigate and fix
+                                                     requestor: state.request.sender |> Map.put_new("provider", state.request.room.provider),
+                                                     cog_env: signal.data,
+                                                     user: Cog.Models.EctoJson.render(state.user),
+                                                     room: state.request.room,
+                                                     reply_to:        state.topic,
+                                                     service_token:   state.service_token,
+                                                     services_root:   ServiceEndpoint.url()}}
+      {{:error, {:denied, rule}}, invocation, _options, _args} ->
+        {:error, :denied, rule, "#{invocation}"}
+      {:error, _reason}=error ->
+        error
+      end
+  end
+
+  defp check_permissions(signal, state) do
     perm_mode = Application.get_env(:cog, :access_rules, :enforcing)
     try do
       with {:ok, bound} <- Binder.bind(state.invocation, signal.data),
-           {:ok, options, args} <- OptionInterpreter.initialize(bound),
-           :allowed <- enforce_permissions(perm_mode, state.invocation.meta, options, args, state.permissions),
-        do: {:ok, "#{bound}", %Cog.Messages.Command{command: state.invocation.meta.full_command_name,
-                                        options: options,
-                                        args: args,
-                                        invocation_id: state.invocation.id,
-                                        invocation_step: signal.position,
-                                        # TODO: stuffing the provider into requestor here is a bit
-                                        # code-smelly; investigate and fix
-                                        requestor: state.request.sender |> Map.put_new("provider", state.request.room.provider),
-                                        cog_env: signal.data,
-                                        user: Cog.Models.EctoJson.render(state.user),
-                                        room: state.request.room,
-                                        reply_to:        state.topic,
-                                        service_token:   state.service_token,
-                                        services_root:   ServiceEndpoint.url()}}
-
+                                                     {:ok, options, args} <- OptionInterpreter.initialize(bound),
+        do: {enforce_permissions(perm_mode, state.invocation.meta, options, args, state.permissions), bound, options, args}
     rescue
       e in BadValueError ->
         {:error, BadValueError.message(e)}
     end
   end
+
 
   defp enforce_permissions(:unenforcing, _meta, _options, _args, _permissions), do: :allowed
   defp enforce_permissions(:enforcing, meta, options, args, permissions) do
@@ -271,8 +295,8 @@ defmodule Cog.Command.Pipeline2.InvokeStage do
     end
   end
 
-  defp dispatch_event(text, cog_env, relay, state) do
-    PipelineEvent.dispatched(state.pipeline_id, :timer.now_diff(:os.timestamp(), state.started),
+  defp dispatch_event(text, cog_env, relay, started, state) do
+    PipelineEvent.dispatched(state.pipeline_id, started,
                              text, relay, cog_env) |> Probe.notify
   end
 

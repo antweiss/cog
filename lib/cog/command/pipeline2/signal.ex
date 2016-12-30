@@ -2,6 +2,7 @@ defmodule Cog.Command.Pipeline2.Signal do
 
   defstruct [
     data: nil,
+    invocation: "",
     bundle_version_id: nil,
     template: nil,
     position: nil,
@@ -11,7 +12,12 @@ defmodule Cog.Command.Pipeline2.Signal do
 
   def done, do: %__MODULE__{done: true}
 
-  def error(error), do: %__MODULE__{data: error, failed: true}
+  def error(error), do: %__MODULE__{data: error, failed: true, bundle_version_id: "common", template: "error"}
+
+  def error(error, invocation) do
+    signal = __MODULE__.error(error)
+    %{signal | invocation: invocation}
+  end
 
   def wrap(data), do: %__MODULE__{data: data}
 

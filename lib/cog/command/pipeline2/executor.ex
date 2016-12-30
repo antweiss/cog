@@ -84,15 +84,23 @@ defmodule Cog.Command.Pipeline2.Executor do
     case parse(state) do
       {:ok, pipeline, destinations, state} ->
         {:ok, initial_context} = create_initial_context(state.request)
-        {:ok, initiator} = InitiatorSup.create(executor: self(),
-          inputs: initial_context, pipeline_id: pipeline_id)
+        initiator = create_initiator(inputs: initial_context, pipeline_id: pipeline_id)
         stages = pipeline
                  |> Enum.with_index
                  |> Enum.reduce([initiator], &(create_invoke_stage(&1, &2, state)))
         {:noreply, %{state | stages: add_terminator(pipeline_id, stages, destinations)}}
       {:error, error, state}->
-        {:ok, initiator} = InitiatorSup.create(inputs: [Signal.error(error)], pipeline_id: pipeline_id)
+        initiator = create_initiator(inputs: [Signal.error(error)], pipeline_id: pipeline_id)
         {:noreply, %{state | stages: add_terminator(pipeline_id, [initiator], [])}}
+    end
+  end
+
+  def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{stages: stages}=state) do
+    if pid in stages do
+      Logger.info("Pipeline #{state.request.id} shutting down due to crashing stage")
+      {:stop, :shutdown, state}
+    else
+      {:noreply, state}
     end
   end
 
@@ -102,23 +110,33 @@ defmodule Cog.Command.Pipeline2.Executor do
     Logger.debug("Pipeline #{state.request.id} executed for #{elapsed} ms")
   end
 
+  defp create_initiator(opts) do
+    opts = [{:executor, self()}|opts]
+    {:ok, initiator} = InitiatorSup.create(opts)
+    :erlang.monitor(:process, initiator)
+    initiator
+  end
+
   defp add_terminator(pipeline_id, [upstream|_]=stages, destinations) do
     opts = [pipeline_id: pipeline_id,
             upstream: upstream,
             destinations: destinations,
             executor: self()]
     {:ok, terminator} = TerminatorSup.create(opts)
+    :erlang.monitor(:process, terminator)
     [terminator|stages]
   end
 
   defp create_invoke_stage({invocation, index}, [upstream|_]=accum, state) do
     opts = [executor: self(),
+            timeout: state.command_timeout,
             upstream: upstream, pipeline_id: state.request.id,
             sequence_id: index + 1, multiplexer: state.mux,
             request: state.request, invocation: invocation,
             user: state.user, permissions: state.permissions,
             service_token: state.service_token]
     {:ok, invoke} = InvokeSup.create(opts)
+    :erlang.monitor(:process, invoke)
     [invoke|accum]
   end
 

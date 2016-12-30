@@ -8,10 +8,10 @@ defmodule Cog.Command.Pipeline2.PipelineSup do
   end
 
   def init(_) do
-    children = [supervisor(Command.Pipeline2.ExecutorSup, []),
-                supervisor(Command.Pipeline2.InitiatorSup, []),
-                supervisor(Command.Pipeline2.InvokeSup, []),
-                supervisor(Command.Pipeline2.TerminatorSup, [])]
+    children = [supervisor(Command.Pipeline2.ExecutorSup, [], shutdown: 100),
+                supervisor(Command.Pipeline2.InitiatorSup, [], shutdown: 100),
+                supervisor(Command.Pipeline2.InvokeSup, [], shutdown: 100),
+                supervisor(Command.Pipeline2.TerminatorSup, [], shutdown: 100)]
     supervise(children, strategy: :one_for_one)
   end
 

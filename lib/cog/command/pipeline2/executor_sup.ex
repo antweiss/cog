@@ -7,7 +7,7 @@ defmodule Cog.Command.Pipeline2.ExecutorSup do
     do: Supervisor.start_link(__MODULE__, [], name: __MODULE__)
 
   def init(_) do
-    children = [worker(Executor, [], restart: :temporary)]
+    children = [worker(Executor, [], restart: :temporary, shutdown: :brutal_kill)]
     supervise(children, strategy: :simple_one_for_one, max_restarts: 0, max_seconds: 1)
   end
 

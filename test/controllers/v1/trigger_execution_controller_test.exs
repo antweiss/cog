@@ -266,7 +266,7 @@ defmodule Cog.V1.TriggerExecutionControllerTest do
     post(conn, "/v1/triggers/#{trigger.id}", Poison.encode!(%{}))
 
     # The pipeline should timeout with the sleep command.
-    assert [%{"pipeline_output" => %{"error_message" => "The operable:sleep command timed out"}}] = Snoop.loop_until_received(snoop, provider: "http")
+    assert [%{"pipeline_output" => %{"error_message" => "The operable:sleep 5 command timed out"}}] = Snoop.loop_until_received(snoop, provider: "http")
 
     # The same pipeline sent through a chat provider should succeed.
     assert [%{body: ["foobar"]}] == Cog.Adapters.Test.Helpers.send_message(user, "@bot: #{pipeline}")

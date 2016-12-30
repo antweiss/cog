@@ -1,12 +1,12 @@
 defmodule Cog.Command.Pipeline2.TerminatorStage do
 
   alias Experimental.GenStage
+  alias Cog.Command.Pipeline.Destination
   alias Cog.Chat.Adapter, as: ChatAdapter
   alias Cog.Command.Pipeline2.{Executor, Signal}
-  alias Cog.Command.ReplyHelper
   alias Cog.ErrorResponse
-  alias Cog.Template.New, as: Template
-  alias Cog.Template.New.Evaluator
+  alias Cog.Template
+  alias Cog.Template.Evaluator
 
   defstruct [
     pipeline_id: nil,
@@ -35,7 +35,8 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
 
   def handle_events(events, _from, state) do
     state = %{state | results: state.results ++ events}
-    if List.last(events) == Signal.done() do
+    last_event  = List.last(events)
+    if Signal.done?(last_event) or Signal.failed?(last_event) do
       # Send output to destinations
       Enum.each(state.results, &(respond(&1, state)))
       # Tell executor we're done
@@ -53,61 +54,106 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
   end
 
   defp respond(signal, state) do
-    unless signal == Signal.done() do
-      if signal.failed do
-        error_response(signal, state)
+    if Signal.done?(signal) do
+      # Pipeline terminated early with no results
+      if length(state.results) == 1 do
+        signal = %{signal | bundle_version_id: "common", template: "early-exit"}
+        early_exit_response(signal, state)
+      end
+    else
+      if Signal.failed?(signal) do
+        request = Executor.get_request(state.executor)
+        started = Executor.get_started(state.executor)
+        destinations = here_destination(request)
+        destinations
+        |> Map.keys
+        |> Enum.each(&error_response(&1, destinations, signal, request, started, state))
       else
-        success_response(signal, state)
+        state.destinations
+        |> Map.keys
+        |> Enum.each(&success_response(&1, signal, state))
       end
     end
   end
 
-  defp success_response(signal, state) do
-    template_name = signal.template
-    by_output_level = Enum.group_by(state.destinations, &(&1.output_level))
-
-    # Render full output first
-    full = Map.get(by_output_level, :full, [])
-
-    directives = Evaluator.evaluate(signal.bundle_version_id,
-                                    template_name,
-                                    Template.with_envelope(signal.data))
-
-    Enum.each(full, fn(dest) ->
-      # TODO: Might want to push this iteration into the provider
-      # itself. Otherwise, we have to pull the provider logic into
-      # here to render the directives once.
-
-      payload = ReplyHelper.choose_payload(dest.adapter, directives, signal.data)
-      ChatAdapter.send(dest.adapter, dest.room, payload)
-    end)
-
-    # Now for status only
-    by_output_level
-    |> Map.get(:status_only, [])
-    |> Enum.each(fn(dest) ->
-      # TODO: For the mesasge typing to work out, this has to be a
-      # bare string... let's find a less hacky way to address things
-      ChatAdapter.send(dest.adapter, dest.room, "ok")
-    end)
+  defp early_exit_response(signal, state) do
+    request = Executor.get_request(state.executor)
+    destinations = here_destination(request)
+    Enum.each(destinations, fn({type, destinations}) ->
+                              output = output_for(type, signal, "success", "Terminated early")
+                             Enum.each(destinations, &ChatAdapter.send(&1.adapter, &1.room, output)) end)
   end
 
-  defp error_response(signal, state) do
-    request = Executor.get_request(state.executor)
-    started = Cog.Events.Util.ts_iso8601_utc(Executor.get_started(state.executor))
+  defp success_response(type, signal, state) do
+    output = output_for(type, signal, "success", nil)
+    state.destinations
+    |> Map.get(type)
+    |> Enum.each(&ChatAdapter.send(&1.adapter, &1.room, output))
+  end
+
+  defp error_response(type, destinations, signal, request, started, state) do
+    message = render_error_message(signal)
     error_context = %{"id" => state.pipeline_id,
                       "started" => started,
                       "initiator" => sender_name(request),
                       "pipeline_text" => request.text,
-                      "error_message" => ErrorResponse.render(unwrap_error(signal.data)),
+                      "message" => message,
                       "planning_failure" => "",
                       "execution_failure" => ""}
-    payload = if ChatAdapter.is_chat_provider?(request.adapter) do
-      Evaluator.evaluate("error", error_context)
-    else
-      error_context
+    signal = %{signal | data: error_context}
+    output = output_for(type, signal, "error", message)
+    destinations
+    |> Map.get(type)
+    |> Enum.each(&ChatAdapter.send(&1.adapter, &1.room, output))
+  end
+
+  defp render_error_message(signal) do
+    cond do
+      signal.data == :timeout ->
+        ErrorResponse.render({signal.data, signal.invocation})
+      signal.data == :denied ->
+        invocation = Map.get(signal.invocation, :invocation)
+        rule = Map.get(signal.invocation, :rule)
+        ErrorResponse.render({:denied, {rule, invocation}})
+      true ->
+        ErrorResponse.render(signal.data)
     end
-    ChatAdapter.send(request.adapter, request.room, payload)
+  end
+
+  defp output_for(:chat, signal, _, _) do
+    output   = signal.data
+    bundle_vsn = signal.bundle_version_id
+    template_name = signal.template
+    if bundle_vsn == "common" do
+        if template_name in ["error", "unregistered-user"] do
+          # No "envelope" for these templates right now
+          Evaluator.evaluate(template_name, output)
+        else
+          Evaluator.evaluate(template_name, Template.with_envelope(output))
+        end
+    else
+      Evaluator.evaluate(bundle_vsn, template_name, Template.with_envelope(output))
+    end
+   end
+  defp output_for(:trigger, signal, status, message) do
+    if Signal.failed?(signal) do
+      %{status: status, pipeline_output: %{error_message: message}}
+    else
+        envelope = %{status: status,
+                     pipeline_output: List.wrap(signal.data)}
+      if message do
+        Map.put(envelope, :message, message)
+      else
+        envelope
+      end
+    end
+  end
+  defp output_for(:status_only, signal, status, message) do
+    if Signal.failed?(signal) do
+      %{status: status, pipeline_output: %{error_message: message}}
+    else
+      %{status: status}
+    end
   end
 
   defp sender_name(request) do
@@ -118,7 +164,9 @@ defmodule Cog.Command.Pipeline2.TerminatorStage do
     end
   end
 
-  defp unwrap_error({:error, reason}), do: reason
-  defp unwrap_error(error), do: error
+  defp here_destination(request) do
+    {:ok, destinations} = Destination.process(["here"], request.sender, request.room, request.adapter)
+    destinations
+  end
 
 end
